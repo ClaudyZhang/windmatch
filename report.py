@@ -306,6 +306,7 @@ def build_report(
     wind_data: dict,
     power_calc: dict,
     matches: list,
+    storage_advice: dict = None,
 ) -> str:
     """
     生成完整的PDF选型报告。
@@ -523,6 +524,73 @@ def build_report(
             story.append(spacer(0.25))
     else:
         story.append(Paragraph("未找到符合条件的型号，请调整预算或联系专业工程师进一步评估。", sBody))
+        story.append(spacer(0.3))
+
+    # ══════════════════════════════════════════════════════════════════════
+    # 第四.五部分：储能配置建议（仅当用户需要储能时）
+    # ══════════════════════════════════════════════════════════════════════
+    if storage_advice:
+        story.append(PageBreak())
+        story.append(chapter_banner("第四部分（续）  储能配置建议"))
+        story.append(spacer(0.25))
+
+        grid_type = user_input.get("grid_type", "off-grid")
+        autonomy_label = "离网备用" if grid_type == "off-grid" else "并网平滑"
+
+        story.append(Paragraph(
+            f"您选择了需要储能配套，系统类型为{grid_labels.get(grid_type, '—')}。"
+            f"以下是基于推荐首选风机（{matches[0]['brand']} {matches[0]['model']}）的储能配置建议：",
+            sBody))
+        story.append(spacer(0.2))
+
+        # 储能核心参数
+        story.append(Paragraph("电池储能配置", sH2))
+        story.append(kv_table([
+            ("日均用电量", f"{storage_advice['daily_consumption_kwh']} kWh"),
+            ("日均发电量", f"{storage_advice['daily_generation_kwh']} kWh"),
+            ("设计备用时间", f"{storage_advice['autonomy_days']}天（{autonomy_label}）"),
+            ("推荐电池容量", f"{storage_advice['battery_capacity_kwh']} kWh"),
+            ("电池类型", storage_advice['battery_type']),
+            ("循环寿命", f"{storage_advice['cycle_life']} 次"),
+            ("系统直流电压", f"{storage_advice['dc_voltage']} V"),
+        ]))
+        story.append(spacer(0.2))
+
+        # 电池组配置
+        story.append(Paragraph("电池组配置方案", sH2))
+        story.append(kv_table([
+            ("标准电池模块", f"{storage_advice['battery_module_size_kwh']} kWh / 组"),
+            ("建议模块数量", f"{storage_advice['num_battery_modules']} 组"),
+            ("实际配置容量", f"{storage_advice['actual_battery_capacity_kwh']} kWh"),
+            ("储能逆变器", f"{storage_advice['inverter_kw']} kW"),
+        ]))
+        story.append(spacer(0.2))
+
+        # 成本估算
+        story.append(Paragraph("储能成本估算", sH2))
+        story.append(kv_table([
+            ("电池组成本", f"¥{storage_advice['battery_cost']:,} 元"),
+            ("储能逆变器", f"¥{storage_advice['inverter_cost']:,} 元"),
+            ("BMS 电池管理", f"¥{storage_advice['bms_cost']:,} 元"),
+            ("储能总计", f"¥{storage_advice['total_storage_cost']:,} 元"),
+            ("电池单价参考", f"约 ¥{storage_advice['battery_price_per_kwh']}/kWh（2025年市场均价）"),
+        ]))
+        story.append(spacer(0.2))
+
+        # 储能说明
+        story.append(Paragraph("储能说明", sH3))
+        story.append(Paragraph(
+            "1. 上述电池容量按磷酸铁锂（LiFePO4）计算，放电深度80%，含10%安全余量。",
+            sBody))
+        story.append(Paragraph(
+            "2. 离网系统建议配置2天备用容量，确保连续无风时段仍可正常供电；并网系统0.5天主要用于夜间用电平滑。",
+            sBody))
+        story.append(Paragraph(
+            "3. 电池循环寿命约6000次，按每天完整充放电1次计算，可使用约16年，与风机使用寿命基本匹配。",
+            sBody))
+        story.append(Paragraph(
+            "4. 实际配置建议咨询专业储能系统集成商，根据负载曲线进行精确设计。",
+            sBody))
         story.append(spacer(0.3))
 
     # ══════════════════════════════════════════════════════════════════════

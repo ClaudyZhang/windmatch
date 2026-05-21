@@ -195,6 +195,7 @@ function renderResults(res) {
     renderWind(res.wind_data);
     renderPower(res.power_calc);
     renderMatches(res.matches);
+    renderStorage(res.storage_advice);
 
     // 下载链接
     if (res.report_url) {
@@ -319,4 +320,47 @@ function renderMatches(matches) {
     });
 
     list.html(html);
+}
+
+function renderStorage(storage) {
+    const $card = $('#storage-card');
+
+    if (!storage) {
+        $card.hide();
+        return;
+    }
+
+    $card.show();
+    $card.find('#storage-content').html(`
+        <div class="storage-grid">
+            <div class="storage-stat">
+                <div class="value">${storage.battery_capacity_kwh} <small>kWh</small></div>
+                <div class="label">推荐电池容量</div>
+            </div>
+            <div class="storage-stat">
+                <div class="value">${storage.num_battery_modules} <small>组</small></div>
+                <div class="label">电池组数量（${storage.battery_module_size_kwh} kWh/组）</div>
+            </div>
+            <div class="storage-stat">
+                <div class="value">${storage.inverter_kw} <small>kW</small></div>
+                <div class="label">储能逆变器</div>
+            </div>
+            <div class="storage-stat">
+                <div class="value">${storage.autonomy_days} <small>天</small></div>
+                <div class="label">设计备用时间</div>
+            </div>
+        </div>
+        <div class="storage-details">
+            <div class="storage-detail"><span class="k">电池类型</span><span class="v">${storage.battery_type}</span></div>
+            <div class="storage-detail"><span class="k">实际配置容量</span><span class="v">${storage.actual_battery_capacity_kwh} kWh</span></div>
+            <div class="storage-detail"><span class="k">系统直流电压</span><span class="v">${storage.dc_voltage} V</span></div>
+            <div class="storage-detail"><span class="k">循环寿命</span><span class="v">${storage.cycle_life} 次</span></div>
+            <div class="storage-detail"><span class="k">电池组成本</span><span class="v">¥${storage.battery_cost.toLocaleString()}</span></div>
+            <div class="storage-detail"><span class="k">逆变器+BMS</span><span class="v">¥${(storage.inverter_cost + storage.bms_cost).toLocaleString()}</span></div>
+            <div class="storage-detail storage-total"><span class="k">储能总计</span><span class="v">¥${storage.total_storage_cost.toLocaleString()}</span></div>
+        </div>
+        <div class="storage-note">
+            以上为基于推荐首选机型的估算配置，实际方案请咨询专业储能系统集成商。
+        </div>
+    `);
 }

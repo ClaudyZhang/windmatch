@@ -24,7 +24,7 @@ except Exception:
 from datetime import datetime
 
 from wind_api import get_wind_speed
-from matching import calculate_recommended_power, match_turbines
+from matching import calculate_recommended_power, match_turbines, calculate_storage
 from report import build_report
 
 app = Flask(__name__)
@@ -100,6 +100,17 @@ def analyze():
             top_n=5,
         )
 
+        # ── 4.5 储能配置建议 ─────────────────────────────────
+        storage_advice = None
+        if storage_needed and matches:
+            top_match = matches[0]
+            storage_advice = calculate_storage(
+                monthly_kwh=monthly_kwh,
+                turbine_power_kw=top_match["power_kw"],
+                annual_output_kwh=top_match["annual_output_kwh"],
+                grid_type=grid_type,
+            )
+
         # ── 5. 生成PDF ────────────────────────────────────────
         user_input = {
             "latitude": latitude,
@@ -121,10 +132,11 @@ def analyze():
             wind_data=wind_data,
             power_calc=power_calc,
             matches=matches,
+            storage_advice=storage_advice,
         )
 
         # ── 6. 返回结果 ────────────────────────────────────────
-        return jsonify({
+        result = {
             "success": True,
             "report_url": f"/download/{report_filename}",
             "wind_data": wind_data,
@@ -147,7 +159,11 @@ def analyze():
                 }
                 for i, m in enumerate(matches)
             ],
-        })
+        }
+        if storage_advice:
+            result["storage_advice"] = storage_advice
+
+        return jsonify(result)
 
     except ValueError as e:
         return jsonify({"error": f"输入数据格式错误：{str(e)}"}), 400

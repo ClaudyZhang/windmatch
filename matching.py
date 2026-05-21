@@ -70,6 +70,108 @@ def _suggest_count(recommended_kw: float, unit_power: float) -> int:
     return max(1, min(count, 10))
 
 
+def calculate_storage(
+    monthly_kwh: float,
+    turbine_power_kw: float,
+    annual_output_kwh: int,
+    grid_type: str,
+    daily_hours_autonomy: float = 2.0,
+) -> dict:
+    """
+    计算储能配置建议。
+
+    参数:
+        monthly_kwh: 月均用电量 kWh
+        turbine_power_kw: 选定风机的额定功率 kW
+        annual_output_kwh: 风机预估年发电量 kWh
+        grid_type: "off-grid" / "grid"
+        daily_hours_autonomy: 每日备用小时数（离网建议2~3天，并网建议0.5~1天）
+
+    返回:
+        dict: 储能配置建议
+    """
+    daily_kwh = monthly_kwh / 30  # 日均用电量
+    daily_output = annual_output_kwh / 365  # 日均发电量
+
+    # 并网系统：储能主要用于平滑和自用，备用时间短
+    # 离网系统：储能需覆盖无风期，备用时间长
+    if grid_type == "off-grid":
+        autonomy_days = 2.0  # 离网建议2天备用
+    else:
+        autonomy_days = 0.5  # 并网0.5天（夜间平滑）
+
+    # 电池容量 = 日均用电量 × 备用天数 / 放电深度(取0.8)
+    depth_of_discharge = 0.80
+    battery_capacity_kwh = daily_kwh * autonomy_days / depth_of_discharge
+
+    # DOD损耗系数（考虑电池衰减）
+    battery_capacity_kwh = battery_capacity_kwh * 1.1
+
+    # 根据风机功率确定系统直流电压
+    if turbine_power_kw <= 3:
+        dc_voltage = 48
+    elif turbine_power_kw <= 10:
+        dc_voltage = 96
+    elif turbine_power_kw <= 30:
+        dc_voltage = 192
+    else:
+        dc_voltage = 384
+
+    # 确定电池类型和单价
+    if grid_type == "off-grid":
+        battery_type = "磷酸铁锂（LiFePO4）"
+        battery_price_per_kwh = 800  # 磷酸铁锂约800元/kWh（2025年均价）
+        cycle_life = 6000
+    else:
+        battery_type = "磷酸铁锂（LiFePO4）"
+        battery_price_per_kwh = 700
+        cycle_life = 6000
+
+    # 电池组配置：选用标准电池模块
+    # 常见模块：5.12kWh (51.2V/100Ah), 10.24kWh (51.2V/200Ah)
+    standard_modules = [2.56, 5.12, 10.24, 15.36, 25.6]
+    module_size = min([m for m in standard_modules if m >= battery_capacity_kwh],
+                      default=standard_modules[-1])
+    num_modules = math.ceil(battery_capacity_kwh / module_size)
+    actual_capacity = module_size * num_modules
+
+    # 逆变器选型
+    inverter_kw = turbine_power_kw * 1.2  # 逆变器略大于风机功率
+    # 标准逆变器功率档位
+    std_inverters = [3, 5, 8, 10, 15, 20, 30, 50, 100]
+    inverter_size = min([s for s in std_inverters if s >= inverter_kw],
+                        default=std_inverters[-1])
+
+    # 成本估算
+    battery_cost = actual_capacity * battery_price_per_kwh
+    inverter_cost = inverter_size * 1500  # 逆变器约1500元/kW（含BMS）
+    bms_cost = num_modules * 2000  # BMS每模块约2000元
+    total_storage_cost = battery_cost + inverter_cost + bms_cost
+
+    # 电池更换周期
+    years_per_cycle = cycle_life / 365 / autonomy_days if autonomy_days > 0 else 15
+
+    return {
+        "daily_consumption_kwh": round(daily_kwh, 1),
+        "daily_generation_kwh": round(daily_output, 1),
+        "autonomy_days": autonomy_days,
+        "battery_type": battery_type,
+        "battery_capacity_kwh": round(battery_capacity_kwh, 1),
+        "battery_module_size_kwh": module_size,
+        "num_battery_modules": num_modules,
+        "actual_battery_capacity_kwh": actual_capacity,
+        "dc_voltage": dc_voltage,
+        "cycle_life": cycle_life,
+        "inverter_kw": inverter_size,
+        "battery_cost": int(battery_cost),
+        "inverter_cost": int(inverter_cost),
+        "bms_cost": int(bms_cost),
+        "total_storage_cost": int(total_storage_cost),
+        "battery_price_per_kwh": battery_price_per_kwh,
+        "notes": [],
+    }
+
+
 def _score_product(p: dict, recommended_kw: float, min_power: float, max_power: float,
                    budget_low: float, budget_high: float, grid_type: str,
                    mean_wind: float, cf: float) -> dict:
@@ -146,21 +248,23 @@ def _score_product(p: dict, recommended_kw: float, min_power: float, max_power: 
         budget_score = 15  # 不限制预算
 
     # ── 4. 并网类型匹配 (10分) ────────────────────────────
+    # 严格匹配：并网需求应优先推荐并网/两用型，离网需求同理
     if grid_type == "off-grid" and p_grid in ["off-grid", "both"]:
         grid_score = 10
     elif grid_type == "grid" and p_grid in ["grid", "both"]:
         grid_score = 10
     elif grid_type == "off-grid" and p_grid == "grid":
-        # 纯并网型号用于离网，严重不匹配
-        grid_score = 1
+        # 纯并网型号用于离网：严重不匹配，几乎不可用
+        grid_score = 0
         warnings.append("此型号为纯并网型，不适合离网使用")
     elif grid_type == "grid" and p_grid == "off-grid":
-        grid_score = 3
+        # 纯离网型号用于并网：严重不匹配，几乎不可用
+        grid_score = 0
         warnings.append("此型号为纯离网型，不适合并网需求")
     elif p_grid == "both":
         grid_score = 9
     else:
-        grid_score = 2
+        grid_score = 0
 
     # ── 5. 认证完整性 (10分) ───────────────────────────────
     cert_score = 0

@@ -603,6 +603,87 @@ input[type="number"]::-webkit-inner-spin-button {
     line-height: 1.8;
 }
 
+/* ── 储能配置建议 ── */
+.storage-grid {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 0.8rem;
+    margin-bottom: 1rem;
+}
+
+.storage-stat {
+    text-align: center;
+    padding: 0.8rem;
+    background: linear-gradient(135deg, #f0f7ff, #e8f4fd);
+    border-radius: 8px;
+    border: 1px solid #d0e3f2;
+}
+
+.storage-stat .value {
+    font-size: 1.3rem;
+    font-weight: 700;
+    color: var(--primary);
+}
+
+.storage-stat .label {
+    font-size: 0.72rem;
+    color: var(--gray);
+    margin-top: 0.2rem;
+}
+
+.storage-details {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 0.5rem;
+    margin-bottom: 1rem;
+}
+
+.storage-detail {
+    display: flex;
+    justify-content: space-between;
+    padding: 0.5rem 0.8rem;
+    background: var(--light);
+    border-radius: 6px;
+    font-size: 0.85rem;
+}
+
+.storage-detail .k {
+    color: var(--gray);
+}
+
+.storage-detail .v {
+    font-weight: 600;
+    color: var(--primary);
+}
+
+.storage-detail.storage-total {
+    background: #e8f5e9;
+    border: 1px solid #a5d6a7;
+}
+
+.storage-detail.storage-total .v {
+    color: var(--green);
+    font-size: 0.95rem;
+}
+
+.storage-note {
+    font-size: 0.8rem;
+    color: var(--gray);
+    padding: 0.6rem 0.8rem;
+    background: #fff9e6;
+    border-left: 4px solid var(--accent);
+    border-radius: 0 6px 6px 0;
+}
+
+@media (max-width: 600px) {
+    .storage-grid {
+        grid-template-columns: repeat(2, 1fr);
+    }
+    .storage-details {
+        grid-template-columns: 1fr;
+    }
+}
+
 /* ── 响应式 ── */
 @media (max-width: 600px) {
     .form-row {
