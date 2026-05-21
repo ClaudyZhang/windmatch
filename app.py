@@ -7,7 +7,20 @@ Flask Web 主程序
 from flask import Flask, render_template, request, jsonify, send_file, flash, redirect, url_for
 import os
 import uuid
+import json
 import tempfile
+
+# ── 加载中国城市经纬度数据库 ──────────────────────────────────────────────
+_city_db = {}
+_city_keys = []
+_db_path = os.path.join(os.path.dirname(__file__), "china_cities.json")
+try:
+    with open(_db_path, "r", encoding="utf-8") as _f:
+        _raw = json.load(_f)
+        _city_db = {k: v for k, v in _raw.items() if not k.startswith("_")}
+        _city_keys = sorted(_city_db.keys(), key=len, reverse=True)
+except Exception:
+    pass
 from datetime import datetime
 
 from wind_api import get_wind_speed
@@ -160,37 +173,88 @@ def download(filename):
     )
 
 
+# ── 地理编码工具函数 ─────────────────────────────────────────────────────
+
+def _geocode_local(address):
+    """本地中国城市数据库匹配（零延迟，零依赖）"""
+    addr_clean = address.strip()
+    # 1. 精确匹配
+    if addr_clean in _city_db:
+        lat, lon = _city_db[addr_clean]
+        return lat, lon, addr_clean
+    # 2. 模糊匹配：地址包含城市名，或城市名包含地址
+    for key in _city_keys:
+        if key in addr_clean or addr_clean in key:
+            lat, lon = _city_db[key]
+            return lat, lon, key
+    # 3. 去掉"市""省""区""县"等后缀再匹配
+    suffixes = ["市", "省", "自治区", "特别行政区", "区", "县", "州", "盟", "地区"]
+    for s in suffixes:
+        if addr_clean.endswith(s):
+            trimmed = addr_clean[:-len(s)].strip()
+            if trimmed in _city_db:
+                lat, lon = _city_db[trimmed]
+                return lat, lon, trimmed
+            for key in _city_keys:
+                if key in trimmed or trimmed in key:
+                    lat, lon = _city_db[key]
+                    return lat, lon, key
+            break
+    return None
+
+
+def _geocode_nominatim(address):
+    """Nominatim (OpenStreetMap) — 海外备用"""
+    import requests as req
+    resp = req.get("https://nominatim.openstreetmap.org/search", params={
+        "q": address, "format": "json", "limit": 1, "accept-language": "zh-CN",
+    }, timeout=8, headers={"User-Agent": "WindMatch/1.0"})
+    resp.raise_for_status()
+    data = resp.json()
+    if data:
+        return float(data[0]["lat"]), float(data[0]["lon"]), data[0].get("display_name", "")
+    return None
+
+
+def geocode_address(address):
+    """
+    多源级联地理编码：
+    1. 本地中国城市数据库（零延迟）
+    2. Nominatim（海外环境备用）
+    """
+    # 优先本地数据库
+    result = _geocode_local(address)
+    if result:
+        return {"latitude": result[0], "longitude": result[1], "display_name": result[2], "source": "本地数据库"}
+
+    # 备用：Nominatim（海外服务器可能可用）
+    try:
+        result = _geocode_nominatim(address)
+        if result:
+            return {"latitude": result[0], "longitude": result[1], "display_name": result[2], "source": "Nominatim"}
+    except Exception:
+        pass
+
+    return None, ["本地数据库未匹配", "Nominatim不可达"]
+
+
 @app.route("/api/geocode", methods=["GET"])
 def geocode():
     """
-    简易地理编码：地址 → 经纬度
-    使用 Nominatim（OpenStreetMap免费服务）
+    地理编码API：地址 → 经纬度
+    多源级联，确保国内和海外都能用
     """
     address = request.args.get("address", "").strip()
     if not address:
         return jsonify({"error": "请提供地址"}), 400
 
-    try:
-        import requests as req
-        params = {
-            "q": address,
-            "format": "json",
-            "limit": 1,
-            "accept-language": "zh-CN",
-        }
-        resp = req.get("https://nominatim.openstreetmap.org/search", params=params, timeout=10)
-        resp.raise_for_status()
-        data = resp.json()
-        if data:
-            return jsonify({
-                "latitude": float(data[0]["lat"]),
-                "longitude": float(data[0]["lon"]),
-                "display_name": data[0].get("display_name", ""),
-            })
-        else:
-            return jsonify({"error": "未找到该地址，请尝试更精确的描述"}), 404
-    except Exception as e:
-        return jsonify({"error": f"地理编码失败：{str(e)}"}), 500
+    ret = geocode_address(address)
+    if isinstance(ret, dict):
+        return jsonify(ret)
+    else:
+        errors = ret[1] if ret and len(ret) > 1 else []
+        err_detail = "；".join(errors) if errors else "所有地理编码服务均不可用"
+        return jsonify({"error": f"未找到该地址。{err_detail}。请尝试更精确的描述或直接输入经纬度。"}), 404
 
 
 @app.route("/health")
