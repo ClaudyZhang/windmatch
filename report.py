@@ -15,28 +15,86 @@ from reportlab.platypus import (
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 import os
+import sys
+import urllib.request
+import tempfile
 from datetime import datetime
 
 
-# ── 字体注册 ──────────────────────────────────────────────────────────────
-_candidates = [
-    r"C:\Windows\Fonts\msyh.ttc",
-    r"C:\Windows\Fonts\msyhbd.ttc",
-    r"C:\Windows\Fonts\simhei.ttf",
-]
-_pdf_fonts = []
-for fp in _candidates:
-    if os.path.exists(fp):
-        name = os.path.splitext(os.path.basename(fp))[0]
-        if name not in _pdf_fonts:
+# ── 字体注册（兼容 Windows 和 Linux/Railway）─────────────────────────────
+def _ensure_chinese_font():
+    """
+    确保中文字体可用：
+    1. Windows: 使用系统自带的微软雅黑
+    2. Linux/Railway: 自动下载 Google Noto Sans SC（免费开源）到临时目录
+    返回 (普通字体名, 粗体字体名)
+    """
+    # ── Windows 本地字体 ──
+    _win_fonts = [
+        (r"C:\Windows\Fonts\msyh.ttc",    "msyh",    "msyh"),
+        (r"C:\Windows\Fonts\msyhbd.ttc",  "msyhbd",  "msyhbd"),
+        (r"C:\Windows\Fonts\simhei.ttf",  "simhei",  "simhei"),
+    ]
+    registered = []
+    for fp, name, _ in _win_fonts:
+        if os.path.exists(fp):
             try:
                 pdfmetrics.registerFont(TTFont(name, fp))
-                _pdf_fonts.append(name)
+                registered.append(name)
             except Exception:
                 pass
 
-FONT      = "msyh"      if "msyh"     in _pdf_fonts else (_pdf_fonts[0] if _pdf_fonts else "Helvetica")
-FONT_BOLD = "msyhbd"    if "msyhbd" in _pdf_fonts else FONT
+    if "msyh" in registered and "msyhbd" in registered:
+        return "msyh", "msyhbd"
+    if registered:
+        return registered[0], registered[0]
+
+    # ── Linux/Railway: 下载 Google Noto Sans SC ──
+    font_dir = os.path.join(tempfile.gettempdir(), "windmatch_fonts")
+    os.makedirs(font_dir, exist_ok=True)
+
+    noto_regular = os.path.join(font_dir, "NotoSansSC-Regular.ttf")
+    noto_bold   = os.path.join(font_dir, "NotoSansSC-Bold.ttf")
+
+    # 使用 Google Fonts 的可变字体（单文件包含所有粗细）
+    noto_url = (
+        "https://github.com/google/fonts/raw/main/"
+        "ofl/notosanssc/NotoSansSC%5Bwght%5D.ttf"
+    )
+
+    downloaded = False
+    for path in [noto_regular]:
+        if not os.path.exists(path):
+            try:
+                print(f"[WindMatch] 正在下载中文字体...")
+                req = urllib.request.Request(noto_url, headers={
+                    "User-Agent": "Mozilla/5.0"
+                })
+                with urllib.request.urlopen(req, timeout=60) as resp:
+                    with open(path, "wb") as f:
+                        f.write(resp.read())
+                downloaded = True
+                print(f"[WindMatch] 中文字体下载完成")
+            except Exception as e:
+                print(f"[WindMatch] 字体下载失败: {e}")
+
+    # 注册字体
+    if os.path.exists(noto_regular):
+        try:
+            pdfmetrics.registerFont(TTFont("noto_sc", noto_regular))
+            registered.append("noto_sc")
+        except Exception as e:
+            print(f"[WindMatch] 字体注册失败: {e}")
+
+    if "noto_sc" in registered:
+        return "noto_sc", "noto_sc"
+
+    # 最终兜底
+    print("[WindMatch] 警告: 未找到中文字体，PDF中文可能显示为方块")
+    return "Helvetica", "Helvetica-Bold"
+
+
+FONT, FONT_BOLD = _ensure_chinese_font()
 
 W, H = A4
 MARGIN = 2.0 * cm
@@ -151,7 +209,6 @@ def kv_table(rows, col_w=None):
 def multi_col_table(headers, rows, col_widths=None, header_color=C_DARK):
     ts_h = S("th", fontName=FONT_BOLD, fontSize=8.5, textColor=colors.white, alignment=1)
     ts_d = S("td", fontName=FONT, fontSize=8.2, textColor=colors.HexColor("#2C2C2C"))
-    # 默认居中对齐
     ts_dc = S("tdc", fontName=FONT, fontSize=8.2, textColor=colors.HexColor("#2C2C2C"), alignment=1)
     data = [[Paragraph(h, ts_h) for h in headers]]
     for row in rows:
@@ -196,9 +253,8 @@ def score_bar_table(matches: list):
         price_str = f"¥{m['price_low']:,} ~ {m['price_high']:,}"
         score_str = f"{m['score_pct']:.0f}分"
 
-        # 评分条形
         score_pct = m['score_pct']
-        bar_width = int(score_pct / 100 * 60)  # 最多60pt宽
+        bar_width = int(score_pct / 100 * 60)
         bar_color = C_GREEN if score_pct >= 75 else (C_ACCENT if score_pct >= 60 else C_ORANGE)
 
         row = [
@@ -222,9 +278,7 @@ def score_bar_table(matches: list):
         ("TOPPADDING",   (0,0), (-1,-1), 5),
         ("BOTTOMPADDING",(0,0), (-1,-1), 5),
         ("VALIGN",       (0,0), (-1,-1), "MIDDLE"),
-        # 高亮第1名（最佳推荐）
         ("BACKGROUND",   (0,1), (-1,1), colors.HexColor("#E8F5E9")),
-        # 高亮第2名
         ("BACKGROUND",   (0,2), (-1,2), colors.HexColor("#FFF8E1")),
     ]))
     return t
@@ -255,13 +309,6 @@ def build_report(
 ) -> str:
     """
     生成完整的PDF选型报告。
-
-    参数:
-        output_path: PDF输出路径
-        user_input: 用户输入数据
-        wind_data: 风资源分析结果
-        power_calc: 功率计算结果
-        matches: 匹配的风机列表
     """
     doc = SimpleDocTemplate(
         output_path, pagesize=A4,
@@ -296,7 +343,6 @@ def build_report(
 
     story.append(spacer(4.0))
 
-    # 封面核心结论
     if matches:
         top = matches[0]
         conclusion_data = [
@@ -365,7 +411,7 @@ def build_report(
 
     if wind_data.get("error"):
         story.append(Paragraph(
-            f"⚠️ 数据说明：{wind_data.get('source', '')} — {wind_data.get('error', '')}",
+            f"数据说明：{wind_data.get('source', '')} — {wind_data.get('error', '')}",
             sCaption))
         story.append(spacer(0.2))
 
@@ -374,7 +420,7 @@ def build_report(
         ("数据时段", wind_data.get("data_period", "—")),
         ("年均风速", f"{wind_data.get('mean_wind_speed', '—')} m/s"),
         ("最大风速", f"{wind_data.get('max_wind_speed', '—')} m/s"),
-        ("风功率密度", f"{wind_data.get('wind_power_density', '—')} W/m²"),
+        ("风功率密度", f"{wind_data.get('wind_power_density', '—')} W/m2"),
         ("威布尔k参数", str(wind_data.get("weibull_k", "—"))),
         ("威布尔a参数", f"{wind_data.get('weibull_a', '—')} m/s"),
         ("风资源等级", f"第{wind_data.get('wind_class', {}).get('grade', '—')}级 — {wind_data.get('wind_class', {}).get('description', '')}"),
@@ -383,19 +429,18 @@ def build_report(
     ]))
     story.append(spacer(0.2))
 
-    # 风资源等级说明
     grade = wind_data.get("wind_class", {}).get("grade", 0)
     grade_explain = {
-        1: "风资源较差，需要选择超低启动风速（≤2.0m/s）的风机，建议搭配光伏形成风光互补系统。",
+        1: "风资源较差，需要选择超低启动风速（<=2.0m/s）的风机，建议搭配光伏形成风光互补系统。",
         2: "风资源较差，冬季可能发电不足，建议选择低切入风机并配置储能。",
-        3: "风资源一般，具备一定经济性，建议选择切入风速≤3.0m/s的机型。",
+        3: "风资源一般，具备一定经济性，建议选择切入风速<=3.0m/s的机型。",
         4: "风资源较好，经济性良好，是小型风机的理想场址。",
         5: "风资源充沛，投资回报较好，可优先考虑风机方案。",
         6: "风资源非常充沛，投资回报优，注意风机抗风设计，避免切出损失。",
-        7: "风资源极佳，需要选择高强度抗台风机型，切出风速建议≥40m/s。",
+        7: "风资源极佳，需要选择高强度抗台风机型，切出风速建议>=40m/s。",
     }
     explain = grade_explain.get(grade, "风资源数据不足以评估。")
-    story.append(Paragraph("💡 风资源评估说明", sH3))
+    story.append(Paragraph("风资源评估说明", sH3))
     story.append(Paragraph(explain, sBody))
     story.append(spacer(0.3))
 
@@ -442,7 +487,6 @@ def build_report(
         story.append(Paragraph("说明：绿色行为最优推荐，黄色行为备选方案。综合评分基于功率匹配度40%、启动风速适配20%、预算匹配20%、并网类型10%、认证完整性10%加权计算。", sCaption))
         story.append(spacer(0.3))
 
-        # ── 每个型号详细卡片 ────────────────────────────────────
         for rank, m in enumerate(matches[:3], 1):
             story.append(KeepTogether([
                 chapter_banner(f"推荐 #{rank}：{m['brand']} {m['model']}"),
@@ -453,7 +497,7 @@ def build_report(
                     ("最低启动风速", f"{m.get('start_wind_speed', '—')} m/s"),
                     ("额定风速", f"{m.get('rated_wind_speed', '—')} m/s"),
                     ("切出风速", f"{m.get('cutout_wind_speed', '—')} m/s"),
-                    ("扫风面积", f"{m.get('swept_area', '—')} m²"),
+                    ("扫风面积", f"{m.get('swept_area', '—')} m2"),
                     ("系统类型", {"off-grid": "纯离网", "grid": "并网", "both": "离并网两用"}.get(m.get("grid_type", ""), "—")),
                     ("价格区间", f"¥{m['price_low']:,} ~ ¥{m['price_high']:,}"),
                     ("质保年限", f"{m.get('warranty_years', '—')} 年"),
@@ -467,16 +511,14 @@ def build_report(
                 ]),
             ]))
 
-            # 推荐理由
             if m.get("reasons"):
                 story.append(spacer(0.1))
                 reasons_text = "，".join(m["reasons"])
-                story.append(Paragraph(f"✅ 推荐理由：{reasons_text}", sGreen))
+                story.append(Paragraph(f"推荐理由：{reasons_text}", sGreen))
 
-            # 警告信息
             if m.get("warnings"):
                 warnings_text = "；".join(m["warnings"])
-                story.append(Paragraph(f"⚠️ 注意事项：{warnings_text}", sRed))
+                story.append(Paragraph(f"注意事项：{warnings_text}", sRed))
 
             story.append(spacer(0.25))
     else:
@@ -495,7 +537,6 @@ def build_report(
         annual_output = top.get("annual_output_kwh", 0)
         price_mid = (top["price_low"] + top["price_high"]) / 2
 
-        # 假设电价（离网：0.8元/kWh，并网：0.6元/kWh）
         elec_price = 0.8 if user_input.get("grid_type") == "off-grid" else 0.6
         annual_saving = annual_output * elec_price
 
@@ -543,9 +584,9 @@ def build_report(
     story.append(spacer(0.25))
     story.append(kv_table([
         ("Step 1：确认需求",
-         "核实月均用电量数据（建议参考最近6个月电费单），确认安装场地是否在规划限制区域（军用、机场、保护区等）。"),
+         "核实月均用电量数据（建议参考最近6个月电费单），确认安装场地是否在规划限制区域。"),
         ("Step 2：实地考察",
-         "委托当地服务商进行为期1个月的实地风速测量，或参考附近气象站数据，验证本报告的风资源评估。"),
+         "委托当地服务商进行为期1个月的实地风速测量，或参考附近气象站数据。"),
         ("Step 3：联系厂家",
          "根据推荐型号联系对应厂家，核实现货情况、认证证书、交货周期和付款条件。"),
         ("Step 4：小额试单",
