@@ -1,0 +1,180 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WindMatch - 小型风机智能选型助手</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+
+<div class="container">
+
+    <!-- 头部 -->
+    <header class="header">
+        <div class="logo">
+            <svg width="36" height="36" viewBox="0 0 36 36" fill="none">
+                <circle cx="18" cy="18" r="17" stroke="#2E7DBF" stroke-width="2"/>
+                <path d="M18 6 C14 10 10 14 10 18 C10 22 14 26 18 30 C22 26 26 22 26 18 C26 14 22 10 18 6Z" fill="#2E7DBF"/>
+                <path d="M18 8 L18 18 L25 18" stroke="white" stroke-width="2" stroke-linecap="round"/>
+            </svg>
+            <div>
+                <h1>WindMatch</h1>
+                <p>小型风机智能选型助手</p>
+            </div>
+        </div>
+        <div class="header-badge">
+            <span>🖤 Powered by WorkBuddy AI</span>
+        </div>
+    </header>
+
+    <!-- 主内容 -->
+    <main class="main-content">
+
+        <!-- 输入表单 -->
+        <section class="form-section">
+            <h2 class="section-title">📍 项目基本信息</h2>
+
+            <div class="form-group">
+                <label for="location-input">项目地点</label>
+                <div class="location-row">
+                    <input type="text" id="location-input" placeholder="输入地址，如：云南省迪庆州，或直接输入经纬度如：27.2, 100.1"
+                           autocomplete="off">
+                    <button type="button" id="geocode-btn" class="btn btn-outline">定位</button>
+                </div>
+                <div class="coords-display" id="coords-display">
+                    <span id="coords-text">尚未定位</span>
+                    <span id="coords-status" class="status-pending">待获取</span>
+                </div>
+            </div>
+
+            <div class="form-row">
+                <div class="form-group">
+                    <label for="latitude">纬度 <span class="required">*</span></label>
+                    <input type="number" id="latitude" step="0.0001" placeholder="例：27.2016" required>
+                </div>
+                <div class="form-group">
+                    <label for="longitude">经度 <span class="required">*</span></label>
+                    <input type="number" id="longitude" step="0.0001" placeholder="例：100.1825" required>
+                </div>
+            </div>
+
+            <h2 class="section-title" style="margin-top:2rem;">⚡ 用电需求</h2>
+
+            <div class="form-row">
+                <div class="form-group">
+                    <label for="monthly_kwh">月均用电量 <span class="required">*</span> <span class="hint">kWh/月</span></label>
+                    <input type="number" id="monthly_kwh" min="1" placeholder="例：300" required>
+                    <p class="form-hint">参考：普通家庭月均约200~500kWh，商铺约1000~3000kWh</p>
+                </div>
+                <div class="form-group">
+                    <label for="usage_type">主要用途</label>
+                    <select id="usage_type">
+                        <option value="home">🏠 家用（住宅/农村）</option>
+                        <option value="commercial">🏨 商业（酒店/景区）</option>
+                        <option value="industrial">🏭 工业（工厂/园区）</option>
+                        <option value="telecom">📡 电信塔</option>
+                        <option value="agriculture">🌾 农业（灌溉/养殖）</option>
+                    </select>
+                </div>
+            </div>
+
+            <div class="form-row">
+                <div class="form-group">
+                    <label for="grid_type">系统类型</label>
+                    <select id="grid_type">
+                        <option value="off-grid">🔋 离网系统（无电网，纯储能）</option>
+                        <option value="grid">🔌 并网系统（余电上网）</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label for="storage_needed">储能配置</label>
+                    <select id="storage_needed">
+                        <option value="false">暂不考虑储能</option>
+                        <option value="true">需要储能配套</option>
+                    </select>
+                </div>
+            </div>
+
+            <div class="form-group">
+                <label for="budget">预算上限（元）<span class="hint">选填，不填则不限</span></label>
+                <input type="number" id="budget" min="0" placeholder="例：100000">
+            </div>
+
+            <div class="form-actions">
+                <button type="button" id="analyze-btn" class="btn btn-primary btn-large">
+                    🚀 开始智能分析
+                </button>
+            </div>
+        </section>
+
+        <!-- 加载状态 -->
+        <div class="loading-state" id="loading-state" style="display:none;">
+            <div class="spinner"></div>
+            <p id="loading-msg">正在抓取风资源数据...</p>
+        </div>
+
+        <!-- 结果区域 -->
+        <section class="result-section" id="result-section" style="display:none;">
+
+            <!-- 风资源数据 -->
+            <div class="result-card" id="wind-card">
+                <h3 class="card-title">🌬️ 风资源评估</h3>
+                <div class="wind-grade-badge" id="wind-grade-badge"></div>
+                <div class="wind-stats" id="wind-stats"></div>
+                <div class="wind-note" id="wind-note"></div>
+            </div>
+
+            <!-- 推荐装机 -->
+            <div class="result-card" id="power-card">
+                <h3 class="card-title">⚡ 推荐装机容量</h3>
+                <div class="power-highlight" id="power-highlight"></div>
+                <div class="power-details" id="power-details"></div>
+            </div>
+
+            <!-- 推荐型号 -->
+            <div class="result-card" id="matches-card">
+                <h3 class="card-title">🏆 推荐型号（综合评分排序）</h3>
+                <div id="matches-list"></div>
+            </div>
+
+            <!-- 下载报告 -->
+            <div class="result-card download-card" id="download-card">
+                <div class="download-content">
+                    <h3>📄 下载完整方案报告</h3>
+                    <p>PDF报告包含：风资源分析、推荐型号详细对比、投资回报测算、下一步行动建议</p>
+                    <a href="#" id="download-pdf-btn" class="btn btn-primary" target="_blank">
+                        ⬇️ 下载PDF报告
+                    </a>
+                </div>
+            </div>
+
+            <div class="result-actions">
+                <button type="button" class="btn btn-outline" onclick="location.reload()">🔄 重新分析</button>
+            </div>
+
+        </section>
+
+        <!-- 错误提示 -->
+        <div class="error-state" id="error-state" style="display:none;">
+            <div class="error-icon">⚠️</div>
+            <h3>分析失败</h3>
+            <p id="error-msg"></p>
+            <button type="button" class="btn btn-outline" onclick="$('#error-state').hide();">重新输入</button>
+        </div>
+
+    </main>
+
+    <footer class="footer">
+        <p>WindMatch 智能选型系统 · 数据来源：Open-Meteo · 价格数据：市场公开数据</p>
+        <p>本工具仅供参考，不构成投资建议 · 报告生成时间：<span id="now-date"></span></p>
+    </footer>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/jquery@3.7.1/dist/jquery.min.js"></script>
+<script src="/static/app.js"></script>
+<script>
+    document.getElementById('now-date').textContent = new Date().toLocaleDateString('zh-CN', {year:'numeric',month:'long',day:'numeric'});
+</script>
+</body>
+</html>
