@@ -2,6 +2,9 @@
 风机选型匹配算法
 根据用户需求（用电量、预算、离网/并网）和风资源数据，
 从数据库中筛选最优匹配的风机型号。
+
+策略：软评分制 — 所有型号都参与评分，不满足条件的扣分而非跳过。
+确保任何输入条件下都有推荐结果返回。
 """
 
 import json
@@ -67,6 +70,174 @@ def _suggest_count(recommended_kw: float, unit_power: float) -> int:
     return max(1, min(count, 10))
 
 
+def _score_product(p: dict, recommended_kw: float, min_power: float, max_power: float,
+                   budget_low: float, budget_high: float, grid_type: str,
+                   mean_wind: float, cf: float) -> dict:
+    """
+    对单个风机型号进行综合评分（软评分制，不会跳过任何型号）。
+
+    返回:
+        dict: 包含评分和详情的字典，如果型号完全不适合返回 None
+    """
+    score = 0
+    reasons = []
+    warnings = []
+
+    p_power = p["power_kw"]
+    start_wind = p.get("start_wind_speed", 3.0)
+    p_grid = p.get("grid_type", "both")
+    p_price_low = p.get("price_low", 0)
+    p_price_high = p.get("price_high", 9999999)
+    certs = p.get("certifications", [])
+
+    # ── 1. 功率匹配度 (40分) ──────────────────────────────
+    if min_power <= p_power <= max_power:
+        power_match_ratio = recommended_kw / p_power if p_power > 0 else 0
+        if 0.8 <= power_match_ratio <= 1.2:
+            power_score = 40
+            reasons.append("功率匹配度高")
+        elif 0.6 <= power_match_ratio <= 1.5:
+            power_score = 30
+            reasons.append("功率基本匹配")
+        else:
+            power_score = 15
+            warnings.append(f"功率偏{'大' if p_power > recommended_kw * 1.5 else '小'}({p_power}kW)")
+    elif p_power < min_power:
+        # 功率偏小：按偏离程度降分，最多给15分
+        ratio = p_power / min_power
+        power_score = max(2, int(15 * ratio))
+        warnings.append(f"单机功率偏小({p_power}kW)，可考虑多台并联")
+    else:
+        # 功率偏大：按偏离程度降分，最多给12分
+        ratio = max_power / p_power
+        power_score = max(2, int(12 * ratio))
+        warnings.append(f"单机功率偏大({p_power}kW)，发电量将有富余")
+
+    # ── 2. 启动风速适配 (20分) ────────────────────────────
+    if start_wind <= mean_wind:
+        start_score = 20
+        reasons.append(f"启动风速{start_wind}m/s ≤ 年均{mean_wind}m/s")
+    elif start_wind <= mean_wind * 1.3:
+        start_score = 12
+        warnings.append("年均风速略低于启动风速，部分时段发电不足")
+    elif start_wind <= mean_wind * 1.6:
+        # 风速不够理想但不是完全发不了电
+        start_score = 5
+        warnings.append(f"启动风速{start_wind}m/s较高，需安装在风速较高的位置")
+    else:
+        # 启动风速远超年均风速，严重不匹配
+        start_score = 0
+        warnings.append(f"⚠️ 启动风速{start_wind}m/s远超年均{mean_wind}m/s，不推荐")
+
+    # ── 3. 预算匹配 (20分) ─────────────────────────────────
+    if budget_low is not None and budget_high is not None:
+        if budget_low <= p_price_low and budget_high >= p_price_high:
+            budget_score = 20
+            reasons.append("在预算范围内")
+        elif budget_low <= p_price_high * 1.2:
+            budget_score = 12
+            reasons.append("略超预算")
+        else:
+            # 超预算但不是完全不匹配，降分但不跳过
+            over_ratio = budget_low / p_price_low if p_price_low > 0 else 0
+            budget_score = max(0, int(8 * over_ratio))
+            warnings.append(f"超出预算（价格¥{p_price_low:,}~¥{p_price_high:,}）")
+    else:
+        budget_score = 15  # 不限制预算
+
+    # ── 4. 并网类型匹配 (10分) ────────────────────────────
+    if grid_type == "off-grid" and p_grid in ["off-grid", "both"]:
+        grid_score = 10
+    elif grid_type == "grid" and p_grid in ["grid", "both"]:
+        grid_score = 10
+    elif grid_type == "off-grid" and p_grid == "grid":
+        # 纯并网型号用于离网，严重不匹配
+        grid_score = 1
+        warnings.append("此型号为纯并网型，不适合离网使用")
+    elif grid_type == "grid" and p_grid == "off-grid":
+        grid_score = 3
+        warnings.append("此型号为纯离网型，不适合并网需求")
+    elif p_grid == "both":
+        grid_score = 9
+    else:
+        grid_score = 2
+
+    # ── 5. 认证完整性 (10分) ───────────────────────────────
+    cert_score = 0
+    if "CE" in certs:
+        cert_score += 5
+    if "IEC" in str(certs):
+        cert_score += 5
+    elif cert_score == 0:
+        cert_score = 2
+        warnings.append("认证信息较少，建议核实")
+
+    # ── 6. 品牌评分 (10分) ─────────────────────────────────
+    brand_rating = p.get("brand_rating", 3)
+    brand_score = brand_rating * 2
+
+    # ── 总分 ─────────────────────────────────────────────
+    total_score = power_score + start_score + budget_score + grid_score + cert_score + brand_score
+
+    # 功率在最佳范围内才有资格拿高分，范围外的整体打折
+    in_range = min_power <= p_power <= max_power
+    if not in_range:
+        total_score = int(total_score * 0.6)
+
+    score_pct = min(100.0, round(total_score, 1))
+
+    # ── 年发电量估算 ─────────────────────────────────────
+    annual_output = round(p_power * cf * 8760)
+    lcoe = _estimate_lcoe(p_power, p_price_low, annual_output) if annual_output > 0 else None
+
+    # ── 投资回报 ─────────────────────────────────────────
+    if lcoe and annual_output > 0:
+        avg_price = (p_price_low + p_price_high) / 2
+        annual_saving = annual_output * 0.6  # 假设电价0.6元/kWh
+        payback_years = round(avg_price / annual_saving, 1) if annual_saving > 0 else None
+        irr = round((annual_saving / avg_price) * 100, 1) if avg_price > 0 else 0
+    else:
+        payback_years = None
+        annual_saving = None
+        irr = None
+
+    return {
+        "id": p["id"],
+        "brand": p["brand"],
+        "model": p["model"],
+        "power_kw": p_power,
+        "rated_power_kw": p["rated_power"],
+        "start_wind_speed": start_wind,
+        "rated_wind_speed": p.get("rated_wind_speed"),
+        "cutout_wind_speed": p.get("cutout_wind_speed"),
+        "blade_type": p.get("blade_type"),
+        "grid_type": p_grid,
+        "swept_area": p.get("swept_area"),
+        "price_low": p_price_low,
+        "price_high": p_price_high,
+        "warranty_years": p.get("warranty_years"),
+        "certifications": certs,
+        "tags": p.get("tags", []),
+        "annual_output_kwh": annual_output,
+        "capacity_factor": round(cf, 3),
+        "lcoe": lcoe,
+        "payback_years": payback_years,
+        "annual_saving": annual_saving,
+        "irr": irr,
+        "score_pct": score_pct,
+        "score_breakdown": {
+            "power": power_score,
+            "start_wind": start_score,
+            "budget": budget_score,
+            "grid": grid_score,
+            "cert": cert_score,
+            "brand": brand_score,
+        },
+        "reasons": reasons,
+        "warnings": warnings,
+    }
+
+
 def match_turbines(
     recommended_kw: float,
     min_power: float,
@@ -81,6 +252,9 @@ def match_turbines(
     """
     核心匹配算法：筛选最优风机型号。
 
+    采用软评分制，所有型号都参与评分，不适合的扣分而非跳过。
+    确保任何输入条件下都有推荐结果返回。
+
     参数:
         recommended_kw: 推荐装机容量 kW
         min_power: 最小功率 kW
@@ -93,157 +267,32 @@ def match_turbines(
         top_n: 返回前N个结果
 
     返回:
-        list of dict: 排序后的推荐风机列表
+        list of dict: 排序后的推荐风机列表（保证至少有1个结果）
     """
     db = load_turbine_db()
     products = db["products"]
 
     # 年均风速（如果有）
     mean_wind = wind_data.get("mean_wind_speed", 5.0) if wind_data else 5.0
+    cf = wind_data.get("capacity_factor_estimate", 0.25) if wind_data else 0.25
 
     scored = []
 
     for p in products:
-        score = 0
-        reasons = []
-        warnings = []
-
-        # ── 1. 功率匹配度 (40分) ──────────────────────────────
-        p_power = p["power_kw"]
-        if min_power <= p_power <= max_power:
-            power_match_ratio = recommended_kw / p_power if p_power > 0 else 0
-            if 0.8 <= power_match_ratio <= 1.2:
-                power_score = 40
-                reasons.append("功率匹配度高")
-            elif 0.6 <= power_match_ratio <= 1.5:
-                power_score = 30
-                reasons.append("功率基本匹配")
-            else:
-                power_score = 15
-                warnings.append(f"功率偏{f'大({p_power}kW)' if p_power > recommended_kw * 1.5 else f'小({p_power}kW)'}")
-        else:
-            continue  # 不在功率范围内，跳过
-
-        # ── 2. 启动风速适配 (20分) ────────────────────────────
-        start_wind = p.get("start_wind_speed", 3.0)
-        if start_wind <= mean_wind:
-            start_score = 20
-            reasons.append(f"启动风速{start_wind}m/s ≤ 年均{mean_wind}m/s")
-        elif start_wind <= mean_wind * 1.3:
-            start_score = 12
-            warnings.append("年均风速略低于启动风速，冬季可能发电不足")
-        else:
-            start_score = 0
-            warnings.append(f"⚠️ 年均风速{mean_wind}m/s < 启动风速{start_wind}m/s，发不了电！")
-            continue  # 不可用，直接跳过
-
-        # ── 3. 预算匹配 (20分) ─────────────────────────────────
-        p_price_low = p.get("price_low", 0)
-        p_price_high = p.get("price_high", 9999999)
-
-        if budget_low is not None and budget_high is not None:
-            if budget_low <= p_price_low and budget_high >= p_price_high:
-                budget_score = 20
-                reasons.append("在预算范围内")
-            elif budget_low <= p_price_high * 1.2:
-                budget_score = 12
-                reasons.append("略超预算")
-            else:
-                budget_score = 0
-                continue  # 超预算太多，跳过
-        else:
-            budget_score = 15  # 不限制预算
-
-        # ── 4. 并网类型匹配 (10分) ────────────────────────────
-        p_grid = p.get("grid_type", "both")
-        if grid_type == "off-grid" and p_grid in ["off-grid", "both"]:
-            grid_score = 10
-        elif grid_type == "grid" and p_grid in ["grid", "both"]:
-            grid_score = 10
-        elif grid_type == "grid" and p_grid == "off-grid":
-            grid_score = 3
-            warnings.append("此型号为纯离网型，不适合并网需求")
-        elif p_grid == "both":
-            grid_score = 9
-        else:
-            grid_score = 0
-            continue
-
-        # ── 5. 认证完整性 (10分) ───────────────────────────────
-        certs = p.get("certifications", [])
-        cert_score = 0
-        if "CE" in certs:
-            cert_score += 5
-        if "IEC" in str(certs):
-            cert_score += 5
-        elif cert_score == 0:
-            cert_score = 2
-            warnings.append("认证信息较少，建议核实")
-
-        # ── 6. 品牌评分 (10分) ─────────────────────────────────
-        brand_rating = p.get("brand_rating", 3)
-        brand_score = brand_rating * 2
-
-        # ── 总分 ─────────────────────────────────────────────
-        total_score = power_score + start_score + budget_score + grid_score + cert_score + brand_score
-        max_score = 100
-        score_pct = round(total_score / max_score * 100, 1)
-
-        # ── 年发电量估算 ─────────────────────────────────────
-        cf = wind_data.get("capacity_factor_estimate", 0.25) if wind_data else 0.25
-        annual_output = round(p_power * cf * 8760)
-        lcoe = _estimate_lcoe(p_power, p_price_low, annual_output) if annual_output > 0 else None
-
-        # ── 投资回报 ─────────────────────────────────────────
-        if lcoe and annual_output > 0:
-            payback_years = round((p_price_low + p_price_high) / 2 / (annual_output * 0.6), 1)
-            # 假设电价0.6元/kWh
-            annual_saving = annual_output * 0.6
-            irr = round((annual_saving / ((p_price_low + p_price_high) / 2)) * 100, 1) if ((p_price_low + p_price_high) / 2) > 0 else 0
-        else:
-            payback_years = None
-            annual_saving = None
-            irr = None
-
-        scored.append({
-            "id": p["id"],
-            "brand": p["brand"],
-            "model": p["model"],
-            "power_kw": p_power,
-            "rated_power_kw": p["rated_power"],
-            "start_wind_speed": start_wind,
-            "rated_wind_speed": p.get("rated_wind_speed"),
-            "cutout_wind_speed": p.get("cutout_wind_speed"),
-            "blade_type": p.get("blade_type"),
-            "grid_type": p_grid,
-            "swept_area": p.get("swept_area"),
-            "price_low": p_price_low,
-            "price_high": p_price_high,
-            "warranty_years": p.get("warranty_years"),
-            "certifications": certs,
-            "tags": p.get("tags", []),
-            "annual_output_kwh": annual_output,
-            "capacity_factor": round(cf, 3),
-            "lcoe": lcoe,
-            "payback_years": payback_years,
-            "annual_saving": annual_saving,
-            "irr": irr,
-            "score_pct": score_pct,
-            "score_breakdown": {
-                "power": power_score,
-                "start_wind": start_score,
-                "budget": budget_score,
-                "grid": grid_score,
-                "cert": cert_score,
-                "brand": brand_score,
-            },
-            "reasons": reasons,
-            "warnings": warnings,
-        })
+        result = _score_product(
+            p, recommended_kw, min_power, max_power,
+            budget_low, budget_high, grid_type,
+            mean_wind, cf
+        )
+        if result is not None:
+            scored.append(result)
 
     # 按分数降序排序
     scored.sort(key=lambda x: x["score_pct"], reverse=True)
-    return scored[:top_n]
+
+    # 确保至少返回 top_n 个结果（如果有的话）
+    # 即使分数很低也返回，让用户看到所有选项
+    return scored[:top_n] if scored else []
 
 
 def _estimate_lcoe(power_kw: float, price_low: float, annual_kwh: int) -> float:
